@@ -6,6 +6,12 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"net/http"
+	"os"
+	"regexp"
+	"strings"
+	"time"
+
 	"github.com/flant/k8s-image-availability-exporter/pkg/providers"
 	"github.com/flant/k8s-image-availability-exporter/pkg/providers/amazon"
 	"github.com/flant/k8s-image-availability-exporter/pkg/providers/k8s"
@@ -14,11 +20,6 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/cache"
-	"net/http"
-	"os"
-	"regexp"
-	"strings"
-	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -334,7 +335,7 @@ func (rc *Checker) checkImageAvailability(log *logrus.Entry, imageName string, k
 	}
 
 	if len(rc.config.mirrorsMap) > 0 {
-		imageName = getImageWithMirror(ref.String(), rc.config.mirrorsMap)
+		imageName = getImageWithMirror(ref.Name(), rc.config.mirrorsMap)
 		ref, err = parseImageName(imageName, rc.config.defaultRegistry, rc.config.plainHTTP)
 		if err != nil {
 			return checkImageNameParseErr(log, err)
