@@ -2,6 +2,7 @@ package registry
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"path"
 	"strconv"
@@ -38,9 +39,6 @@ func Test_parseImageName(t *testing.T) {
 	require.Equal(t, path.Join(defaultRegistryName, goodImageNameWithoutRegistry), ref.Name())
 }
 
-var log = logrus.NewEntry(logrus.StandardLogger())
-var kcMock authn.Keychain = nil
-
 // Return statusCode from first 3 chars of http host.
 // For example: request to 404.docker.io returns statusCode 404 (NotFound)
 type MockRegistryTransportStatuses struct {
@@ -53,7 +51,7 @@ func (m *MockRegistryTransportStatuses) RoundTrip(req *http.Request) (*http.Resp
 			StatusCode: statusCode,
 			Body:       http.NoBody,
 			Header: http.Header{
-				"Content-Type":          {"application/vnd.docker.distribution.manifest.v1+json"},
+				"Content-Type":          {"application/vnd.docker.distribution.manifest.v2+json"},
 				"Docker-Content-Digest": {"sha256:33e0bbc7ca9ecf108140af6288c7c9d1ecc77548cbfd3952fd8466a75edefe57"},
 			},
 		}, nil
@@ -63,6 +61,12 @@ func (m *MockRegistryTransportStatuses) RoundTrip(req *http.Request) (*http.Resp
 }
 
 func Test_checkImageAvailability_statuses(t *testing.T) {
+	var kcMock authn.Keychain = nil
+
+	logger := logrus.New()
+	logger.SetOutput(io.Discard)
+	log := logrus.NewEntry(logger)
+
 	rc := &Checker{
 		config: registryCheckerConfig{
 			defaultRegistry: "index.docker.io",
@@ -73,6 +77,12 @@ func Test_checkImageAvailability_statuses(t *testing.T) {
 	}
 
 	mode := rc.checkImageAvailability(log, fmt.Sprintf("%d.local/test:test", http.StatusOK), kcMock)
+	assert.Equal(t, store.Available, mode)
+
+	mode = rc.checkImageAvailability(log, fmt.Sprintf("%d.local/library/test:test", http.StatusOK), kcMock)
+	assert.Equal(t, store.Available, mode)
+
+	mode = rc.checkImageAvailability(log, fmt.Sprintf("%d.local/test@sha256:33e0bbc7ca9ecf108140af6288c7c9d1ecc77548cbfd3952fd8466a75edefe57", http.StatusOK), kcMock)
 	assert.Equal(t, store.Available, mode)
 
 	mode = rc.checkImageAvailability(log, fmt.Sprintf("%d.local/test:test", http.StatusNotFound), kcMock)
@@ -86,6 +96,12 @@ func Test_checkImageAvailability_statuses(t *testing.T) {
 
 	mode = rc.checkImageAvailability(log, fmt.Sprintf("%d.local/test:test", http.StatusRequestTimeout), kcMock)
 	assert.Equal(t, store.UnknownError, mode)
+
+	mode = rc.checkImageAvailability(log, "te*^#@@st", kcMock)
+	assert.Equal(t, store.BadImageName, mode)
+
+	mode = rc.checkImageAvailability(log, "test@sha256:33e0bbc7ca9e", kcMock)
+	assert.Equal(t, store.BadImageName, mode)
 }
 
 // It is assumed that defaultRegistry is unavailable, but mirrors are working.
@@ -98,7 +114,7 @@ func (m *MockMirrorRegistryTransport) RoundTrip(req *http.Request) (*http.Respon
 			StatusCode: http.StatusOK,
 			Body:       http.NoBody,
 			Header: http.Header{
-				"Content-Type":          {"application/vnd.docker.distribution.manifest.v1+json"},
+				"Content-Type":          {"application/vnd.docker.distribution.manifest.v2+json"},
 				"Docker-Content-Digest": {"sha256:33e0bbc7ca9ecf108140af6288c7c9d1ecc77548cbfd3952fd8466a75edefe57"},
 			},
 		}, nil
@@ -111,24 +127,45 @@ func (m *MockMirrorRegistryTransport) RoundTrip(req *http.Request) (*http.Respon
 }
 
 func Test_checkImageAvailability_mirrorForDefaultRegistry(t *testing.T) {
+	var kcMock authn.Keychain = nil
+
+	logger := logrus.New()
+	logger.SetOutput(io.Discard)
+	log := logrus.NewEntry(logger)
+
 	rc := &Checker{
 		config: registryCheckerConfig{
 			defaultRegistry: "index.docker.io",
-			mirrorsMap:      map[string]string{"index.docker.io": "mirror.local"},
-			plainHTTP:       false,
+			mirrorsMap: map[string]string{
+				"index.docker.io": "mirror.local",
+				"badhost.io":      "te*^#@@st.io",
+			},
+			plainHTTP: false,
 		},
 		registryTransport: &MockMirrorRegistryTransport{},
 	}
 
 	mode := rc.checkImageAvailability(log, "test:test", kcMock)
-	assert.Equal(t, store.Available, mode)
+	assert.Equal(t, store.Available, mode) // Via mirror
+
+	mode = rc.checkImageAvailability(log, "library/test:test", kcMock)
+	assert.Equal(t, store.Available, mode) // Via mirror
+
+	mode = rc.checkImageAvailability(log, "test@sha256:33e0bbc7ca9ecf108140af6288c7c9d1ecc77548cbfd3952fd8466a75edefe57", kcMock)
+	assert.Equal(t, store.Available, mode) // Via mirror
 
 	mode = rc.checkImageAvailability(log, "index.docker.io/test:test", kcMock)
-	assert.Equal(t, store.Available, mode)
+	assert.Equal(t, store.Available, mode) // Via mirror
 
-	mode = rc.checkImageAvailability(log, "docker.io/test:test", kcMock)
-	assert.Equal(t, store.Available, mode)
+	mode = rc.checkImageAvailability(log, "local.io/test:test", kcMock)
+	assert.Equal(t, store.UnknownError, mode) // Not via mirror
 
-	mode = rc.checkImageAvailability(log, "local/test:test", kcMock)
-	assert.Equal(t, store.Available, mode)
+	mode = rc.checkImageAvailability(log, "local.io/library/test:test", kcMock)
+	assert.Equal(t, store.UnknownError, mode) // Not via mirror
+
+	mode = rc.checkImageAvailability(log, "te*^#@@st", kcMock)
+	assert.Equal(t, store.BadImageName, mode) // Bad image name
+
+	mode = rc.checkImageAvailability(log, "badhost.io/test:test", kcMock)
+	assert.Equal(t, store.BadImageName, mode) // Bad host name in mirrorsMap
 }
